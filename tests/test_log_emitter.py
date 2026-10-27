@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import sys
 
 from nitrostack.core.context import FileLogger
 from nitrostack.core.log_emitter import LogEmitter, LogEmitterHandler, log_emitter
@@ -17,14 +16,22 @@ def test_nitrostack_warning_reaches_last_resort_stderr_without_subscribers(capsy
     old_level = logger.level
     old_propagate = logger.propagate
     old_handlers = list(logger.handlers)
+    old_last_resort = logging.lastResort
+    fallback = logging.StreamHandler()
     try:
         for handler in old_handlers:
             logger.removeHandler(handler)
+        fallback.setLevel(logging.WARNING)
+        fallback.stream = capsys._capture.err
+        logging.lastResort = fallback
         logger.setLevel(logging.WARNING)
         logger.propagate = True
         logger.warning("warning before subscription")
+        assert not any(getattr(handler, "_nitrostack_log_emitter", False) for handler in logger.handlers)
         assert "warning before subscription" in capsys.readouterr().err
     finally:
+        logging.lastResort = old_last_resort
+        fallback.close()
         for handler in list(logger.handlers):
             logger.removeHandler(handler)
         for handler in old_handlers:

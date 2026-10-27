@@ -266,6 +266,32 @@ The SDK reads standard settings from the environment or `.env` files:
 | `NITROSTACK_LOG_TO_STDOUT` | Set to `true` to allow logging to stdout under stdio transport (Caution: may corrupt protocol stream). |
 | `NITROSTACK_HTTP_DEBUG` | Set to `1` to log every HTTP request (method, path, headers, body) and response status to stderr. Use when diagnosing a client that fails to connect: uvicorn's access log shows neither headers nor timestamps. |
 
+### Keeping secrets out of logs (`SecretValue`)
+
+Wrap a secret in `SecretValue` so it cannot end up in logs, `repr`, tracebacks, pickles or
+serialized output. Everything prints `[SecretValue: REDACTED]`. The raw value is only available
+through `unwrap()`.
+
+```python
+from nitrostack import SecretValue, JWTModule, ApiKeyModule
+
+jwt_secret = SecretValue.from_env("JWT_SECRET")          # raises if the variable is not set
+optional = SecretValue.from_env_optional("MAYBE_SECRET")  # None if it is not set
+
+print(f"{jwt_secret}")       # [SecretValue: REDACTED]
+JWTModule.for_root(secret=jwt_secret)
+ApiKeyModule.for_root(keys=[SecretValue.from_env("SERVICE_API_KEY")])
+```
+
+- `SecretValue.from_value("...", allow_hardcoded=True, reason="test")` is for values written in code
+  (tests). It must be allowed explicitly and it warns.
+- Pickling and Pydantic/JSON output are redacted too. A pickled secret loads back with no value, and
+  `unwrap()` raises instead of returning a fake one.
+- `==` compares with `hmac.compare_digest`.
+- `JWTModule`, `ApiKeyModule`, `OAuthModule` (the two client secrets) and `ConfigService`
+  (`defaults`, `get_secret()`) accept a `SecretValue` or a plain `str`.
+- `is_secret_value(x)` and `unwrap_secret(x)` help code that takes either.
+
 ---
 
 ## Transport Options

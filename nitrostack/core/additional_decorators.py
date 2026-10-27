@@ -1,4 +1,5 @@
 import time
+import inspect
 from functools import wraps
 from typing import Callable, Any, Dict, List, Tuple
 from nitrostack.core.context import ExecutionContext
@@ -100,26 +101,21 @@ class HealthCheckRegistry:
         return cls._bound_checks
 
     @classmethod
-    def run_all(cls) -> Dict[str, str]:
-        results = {}
-        for name, check_fn in cls._bound_checks.items():
+    async def run_all(cls) -> Dict[str, str]:
+        """Run every registered health check and return {name: status}.
+
+        Coroutine checks are awaited, sync checks are called directly, and a
+        check that raises reports its own error without affecting the others.
+        """
+        results: Dict[str, str] = {}
+        for name, check in list(cls._bound_checks.items()):
             try:
-                # Handle both sync and async checks
-                import inspect
-                if inspect.iscoroutinefunction(check_fn):
-                    # In a real environment, we'd await it, but let's handle it or run via loop
-                    import asyncio
-                    try:
-                        loop = asyncio.get_event_loop()
-                    except RuntimeError:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                    status = loop.run_until_complete(check_fn())
-                else:
-                    status = check_fn()
-                results[name] = "healthy" if status else "unhealthy"
-            except Exception as e:
-                results[name] = f"error: {str(e)}"
+                outcome = check()
+                if inspect.isawaitable(outcome):
+                    outcome = await outcome
+                results[name] = "healthy" if outcome else "unhealthy"
+            except Exception as exc:  # noqa: BLE001 - one bad check must not hide the rest
+                results[name] = f"error: {exc}"
         return results
 
 def health_check(name: str):

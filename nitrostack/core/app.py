@@ -10,7 +10,9 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Pattern, Set, Tuple, Type
-
+from nitrostack.transforms import (
+    SyntheticTool, ToolArgumentError, TransformContext, validate_tool_arguments,
+)
 import mcp.types as types
 from mcp import MCPError
 from mcp.server.context import ServerRequestContext
@@ -25,6 +27,12 @@ from mcp.types import (
     UnsubscribeRequestParams,
 )
 from pydantic import BaseModel, create_model
+from nitrostack.transforms import (
+    TransformContext,
+    TransformError,
+    TransformPipeline,
+    TransformRegistry,
+)
 
 from nitrostack.core.context import ExecutionContext, TaskContext
 from nitrostack.core.decorators import ToolConfig, ResourceConfig, PromptConfig, widget_resource_uri
@@ -128,6 +136,59 @@ def resolve_http_host() -> str:
     return (os.environ.get("HOST") or "127.0.0.1").strip() or "127.0.0.1"
 
 
+def _read_dotenv_value(root: str, key: str) -> Optional[str]:
+    path = os.path.join(root, ".env")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                if name.strip() != key:
+                    continue
+                return value.strip().strip('"').strip("'") or None
+    except OSError:
+        return None
+    return None
+
+
+def _project_identity(root: Optional[str] = None) -> Dict[str, Optional[str]]:
+    """Name / version / description for the `GET /` documentation page."""
+    cwd = root or os.getcwd()
+    name = os.environ.get("SERVER_NAME") or _read_dotenv_value(cwd, "SERVER_NAME")
+    description = os.environ.get("SERVER_DESC") or _read_dotenv_value(cwd, "SERVER_DESC")
+    version = None
+    path = os.path.join(cwd, "pyproject.toml")
+    if os.path.isfile(path):
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        if not name:
+            match = re.search(r'(?m)^name\s*=\s*"([^"]+)"', text)
+            name = match.group(1) if match else None
+        if not description:
+            match = re.search(r'(?m)^description\s*=\s*"([^"]+)"', text)
+            description = match.group(1) if match else None
+        match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
+        version = match.group(1) if match else None
+    if not name:
+        name = os.path.basename(os.path.abspath(cwd)) or None
+    return {"name": name, "version": version, "description": description}
+
+
+def _apply_project_identity(config: "ServerConfig") -> None:
+    ident = _project_identity()
+    generic = (config.name or "").strip().lower() in {"", "app", "mcp-server"}
+    if generic and ident.get("name"):
+        config.name = ident["name"]
+    if not config.description and ident.get("description"):
+        config.description = ident["description"]
+
+
 @dataclass
 class ServerConfig:
     name: str
@@ -149,19 +210,24 @@ class ServerConfig:
     session_timeout_ms: Optional[int] = None
     json_response: bool = False
     extensions: Optional[Dict[str, str]] = None
+    # Subtitle on the `GET /` documentation page.
+    description: Optional[str] = None
 
 
-def mcp_app(module: Type, server: ServerConfig):
-    """
-    Decorator to declare the main application class.
-    Specifies the root AppModule and ServerConfig.
-    """
+def mcp_app(
+    module: Type,
+    server: ServerConfig,
+    transforms: Optional[List[Any]] = None,
+):
+    """Declare an MCP application and its optional tool-list transforms."""
+
     def decorator(cls: Type):
         cls._mcp_app_module = module
         cls._mcp_app_server = server
+        cls._mcp_transforms = list(transforms or [])
         return cls
-    return decorator
 
+    return decorator
 
 def get_pydantic_model(schema: Any) -> Type[BaseModel]:
     """Helper to resolve or construct a Pydantic model for input validation."""
@@ -524,6 +590,7 @@ class McpApplication:
             self.server_config = ServerConfig(name=app_class._mcp_module_config.name or "mcp-server")
         else:
             raise ValueError("Invalid application class. Must be decorated with @mcp_app or @module.")
+        _apply_project_identity(self.server_config)
 
         self.mcp_server: Optional[NitroStackMcpServer] = None
         era_resolution = resolve_protocol_era_resolution(
@@ -543,7 +610,18 @@ class McpApplication:
         self.task_manager = TaskManager()
         self._in_flight = InFlightRegistry()
 
+        # Pipeline first: handlers consult it lazily when requests arrive.
+        self._transforms = TransformPipeline(
+            getattr(self.app_class, "_mcp_transforms", None) or []
+        )
+
         self._bootstrap()
+
+        # Tools are registered now, so transforms can see the catalog.
+        self._transforms.register(TransformRegistry(self._base_tool_list))
+
+    def _base_tool_list(self) -> List[types.Tool]:
+        return [self._build_tool_definition(entry) for entry in self._tools.values()]
 
     def _bootstrap(self) -> None:
         # 1. Construct the low-level server directly.
@@ -756,7 +834,7 @@ class McpApplication:
         )
 
         async def health_status_resource(context: ExecutionContext) -> str:
-            results = HealthCheckRegistry.run_all()
+            results = await HealthCheckRegistry.run_all()
             return json.dumps(results)
 
         self._resources[config.uri] = _ResourceEntry(config=config, instance=None, method=health_status_resource)
@@ -824,9 +902,30 @@ class McpApplication:
         return build_list_endpoint_cache_hint_meta()
 
     def _setup_handlers(self, server: NitroStackMcpServer) -> None:
-        async def _list_tools(_ctx: ServerRequestContext, _params: Optional[PaginatedRequestParams]):
+        async def _list_tools(
+            _ctx: ServerRequestContext,
+            _params: Optional[PaginatedRequestParams],
+        ):
+            tools = [
+                self._build_tool_definition(entry)
+                for entry in self._tools.values()
+            ]
+
+            if self._transforms.enabled:
+                try:
+                    context = TransformContext()
+                    tools = await self._transforms.transform_tools(
+                        tools,
+                        context,
+                    )
+                except TransformError as exc:
+                    raise MCPError(
+                        types.INTERNAL_ERROR,
+                        str(exc),
+                    ) from exc
+
             return types.ListToolsResult(
-                tools=[self._build_tool_definition(entry) for entry in self._tools.values()],
+                tools=tools,
                 _meta=self._list_endpoint_cache_meta(),
             )
 
@@ -1110,6 +1209,12 @@ class McpApplication:
             getattr(method, "_mcp_pipes", []),
             getattr(method, "_mcp_filters", []),
         )
+    def _base_lookup(self, name: str):
+        return self._tools.get(name)
+
+    async def _invoke_for_transform(self, name: str, arguments: dict, tctx: TransformContext):
+        # Re-enter the normal call path so guards and validation run for the real tool.
+        return await self._call_tool(name, arguments, _tctx=tctx)
 
     def _to_call_tool_result(
         self,
@@ -1178,6 +1283,52 @@ class McpApplication:
             isError=False,
         )
 
+    async def _call_tool(
+        self,
+        name: str,
+        arguments: Dict[str, Any],
+        task: Any = None,
+        _tctx: Optional[TransformContext] = None,
+    ):
+        """Resolve through the transform pipeline, then run the real tool path."""
+        if not self._transforms.enabled:
+            return await self._call_real_tool(name, arguments, task=task)
+
+        tctx = _tctx or TransformContext(_invoker=self._invoke_for_transform)
+        try:
+            resolved = await self._transforms.resolve_tool(name, self._base_lookup, tctx)
+        except Exception as exc:
+            logger.exception("Transform failed resolving tool %s", name)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str(exc))], isError=True
+            )
+
+        if isinstance(resolved, SyntheticTool):
+            payload = arguments or {}
+            inner = payload.get("input")
+            if (
+                isinstance(inner, dict)
+                and set(payload) <= {"input"}
+                and "input" not in resolved.input_model.model_fields
+            ):
+                payload = inner  # accept the older {"input": {...}} wrap
+            try:
+                validated = validate_tool_arguments(resolved.name, resolved.input_model, payload)
+                result = await resolved.handler(validated, tctx)
+            except ToolArgumentError as exc:
+                return types.CallToolResult(
+                    content=[types.TextContent(type="text", text=f"{exc}: {exc.errors}")],
+                    isError=True,
+                )
+            except Exception as exc:
+                logger.exception("Synthetic tool %s failed", name)
+                return types.CallToolResult(
+                    content=[types.TextContent(type="text", text=str(exc))], isError=True
+                )
+            return self._to_call_tool_result(result)
+
+        return await self._call_real_tool(name, arguments, task=task)
+
     @staticmethod
     def _call_tool_result_meta(result: types.CallToolResult) -> Optional[Dict[str, Any]]:
         """Read caller ``_meta`` from the field or pydantic extra (alias vs extra)."""
@@ -1225,7 +1376,7 @@ class McpApplication:
         )
         return content
 
-    async def _call_tool(self, name: str, arguments: Dict[str, Any], task: Any = None):
+    async def _call_real_tool(self, name: str, arguments: Dict[str, Any], task: Any = None):
         entry = self._tools.get(name)
         if entry is None:
             return types.CallToolResult(

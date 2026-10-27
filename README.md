@@ -28,6 +28,18 @@ pip install -e .
 ```
 
 ---
+### Security: eMudhra/emSign CA incident
+
+A [security incident](https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576) affecting eMudhra intermediate certificates means older packaging tools can be man-in-the-middled. Use at least:
+
+- pip 26.2.2
+- uv 0.13.4
+- certifi 2026.10.19 (this SDK now requires it)
+
+Upgrade pip and uv in existing virtual environments, refresh lockfiles (`uv lock --upgrade-package certifi`), and rebuild container images. The official `python:3.11` and `3.12` Docker images keep an older pip, so upgrade it with the hash-pinned command from the advisory.
+
+`nitrostack-py install` upgrades the pip in the project `.venv` to a hash-pinned 26.2.2 before installing anything, and refuses to run `uv` older than 0.13.4.
+
 
 ## Scaffolding a New Project (Recommended)
 
@@ -61,6 +73,8 @@ nitrostack-py init my-server --template python-starter --port 4000 --widget 4001
 nitrostack-py dev --port 4000 --widget 4001
 nitrostack-py start --port 4000 --widget 4001
 ```
+
+`init` and `pack` vendor this SDK into `vendor/nitrostack` and pin it with `[tool.uv.sources]`. The dependency name stays `nitrostack` in `pyproject.toml` and `requirements.txt`, so `nitrostack-py install` and NitroCloud still run `uv sync`. Do not put a `file:` URL in `[project].dependencies` — that breaks the cloud wheel metadata.
 
 Once scaffolded, follow the next steps printed by the CLI to run your server, configure environment variables, and try it out.
 
@@ -260,6 +274,7 @@ NitroStack apps can run over three transports, selected via `MCP_TRANSPORT_TYPE`
 
 - **`stdio`** (default outside production): JSON-RPC over stdin/stdout — the standard mode for desktop MCP clients (Claude Desktop, Cursor, etc.).
 - **`http`**: Streamable HTTP + legacy SSE over a real network port, for cloud/remote deployments. Exposes:
+  - `GET /` — documentation landing page (connection setup for Cursor/Claude/ChatGPT plus the registered tool catalog). Same page TypeScript NitroStack serves on Open URL.
   - `POST/GET/DELETE /mcp` — Streamable HTTP (session-based JSON-RPC + SSE streaming). `/mcp` and `/mcp/` are equivalent; the server does not 307 between them (MCP Inspector needs the no-slash URL for its SSE GET).
   - `GET /sse` + `POST /mcp/messages/` — legacy HTTP+SSE for older clients (trailing slash required so messages aren't swallowed by the Streamable HTTP `/mcp` mount)
   - `GET /mcp/health` — health check (`status`, active session count, uptime)

@@ -27,6 +27,7 @@ from mcp.types import (
 from pydantic import BaseModel, create_model
 
 from nitrostack.core.context import ExecutionContext, TaskContext
+from nitrostack.core.visibility import VisibilityTransform
 from nitrostack.core.decorators import ToolConfig, ResourceConfig, PromptConfig, widget_resource_uri
 from nitrostack.core.app_mode import get_app_mode, get_widget_mime_type, is_mcp_app_mode, is_openai_mode
 from nitrostack.core.di import DIContainer
@@ -598,6 +599,7 @@ class McpApplication:
         self._initial_tools: List[Tuple[Any, Callable, ToolConfig]] = []
         self.task_manager = TaskManager()
         self._in_flight = InFlightRegistry()
+        self.visibility_transform = VisibilityTransform()
 
         self._bootstrap()
 
@@ -881,14 +883,21 @@ class McpApplication:
 
     def _setup_handlers(self, server: NitroStackMcpServer) -> None:
         async def _list_tools(_ctx: ServerRequestContext, _params: Optional[PaginatedRequestParams]):
+            session_key = self._visibility_session_key(_ctx)
             return types.ListToolsResult(
-                tools=[self._build_tool_definition(entry) for entry in self._tools.values()],
+                tools=[
+                    self._build_tool_definition(entry)
+                    for entry in self._tools.values()
+                    if self.visibility_transform.is_visible(entry, session_key)
+                ],
                 _meta=self._list_endpoint_cache_meta(),
             )
 
         async def _call_tool(ctx: ServerRequestContext, params: CallToolRequestParams):
             token = request_ctx.set(ctx)
             try:
+                if not self._tool_visible(params.name, ctx):
+                    return self._unknown_tool_result(params.name)
                 result = await self._call_tool(
                     params.name, params.arguments or {}, task=params.task
                 )
@@ -972,14 +981,22 @@ class McpApplication:
         server.add_request_handler("prompts/get", GetPromptRequestParams, _get_prompt)
 
         async def handle_list_tools(req=None):
-            return ServerResult(await _list_tools(None, None))
+            ctx = req if req is not None and hasattr(req, "session") else request_ctx.get(None)
+            return ServerResult(await _list_tools(ctx, None))
 
         async def handle_call_tool(req=None):
             params = getattr(req, "params", None) if req is not None else None
             name = getattr(params, "name", "") if params is not None else ""
             arguments = (getattr(params, "arguments", None) or {}) if params is not None else {}
             task = getattr(params, "task", None) if params is not None else None
-            return ServerResult(await self._call_tool(name, arguments, task=task))
+            ctx = req if req is not None and hasattr(req, "session") else request_ctx.get(None)
+            if not self._tool_visible(name, ctx):
+                return ServerResult(self._unknown_tool_result(name))
+            token = request_ctx.set(ctx)
+            try:
+                return ServerResult(await self._call_tool(name, arguments, task=task))
+            finally:
+                request_ctx.reset(token)
 
         async def handle_list_resources(req=None):
             return ServerResult(await _list_resources(None, None))
@@ -1167,6 +1184,60 @@ class McpApplication:
             getattr(method, "_mcp_filters", []),
         )
 
+    @staticmethod
+    def _visibility_session_key(request_context: Any) -> tuple[str, str] | None:
+        session = getattr(request_context, "session", None)
+        session_id = getattr(session, "id", None) or getattr(session, "session_id", None)
+        if session_id is None:
+            return None
+        auth = auth_context_from_request(request_context)
+        return VisibilityTransform.session_key(
+            str(session_id), auth.subject if auth is not None else None
+        )
+
+    def _tool_visible(self, name: str, request_context: Any) -> bool:
+        entry = self._tools.get(name)
+        if entry is None:
+            return False
+        return self.visibility_transform.is_visible(
+            entry, self._visibility_session_key(request_context)
+        )
+
+    def _configure_visibility_context(
+        self, context: ExecutionContext, request_context: Any
+    ) -> None:
+        key = self._visibility_session_key(request_context)
+        context._tool_visibility_controller = self.visibility_transform
+        context._visibility_session_key = key
+        context._visibility_app = self
+        context._visibility_supported = key is not None
+        context._visibility_change_callback = self._publish_tools_changed
+
+    @staticmethod
+    def _unknown_tool_result(name: str) -> types.CallToolResult:
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=f"Tool '{name}' not found")],
+            isError=True,
+        )
+
+    def _publish_tools_changed(self, context: ExecutionContext) -> None:
+        session = getattr(request_ctx.get(None), "session", None)
+        sender = getattr(session, "send_notification", None) if session is not None else None
+        if sender is None:
+            logger.debug("Transport does not support tools/list_changed notification")
+            return
+
+        async def send_notification() -> None:
+            try:
+                await sender(types.ToolListChangedNotification())
+            except Exception:
+                logger.debug("Unable to send session tools/list_changed notification", exc_info=True)
+
+        try:
+            asyncio.create_task(send_notification())
+        except RuntimeError:
+            logger.debug("No running event loop for tools/list_changed notification")
+
     def _to_call_tool_result(
         self,
         result: Any,
@@ -1283,11 +1354,8 @@ class McpApplication:
 
     async def _call_tool(self, name: str, arguments: Dict[str, Any], task: Any = None):
         entry = self._tools.get(name)
-        if entry is None:
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=f"Tool '{name}' not found")],
-                isError=True,
-            )
+        if entry is None or not self._tool_visible(name, request_ctx.get(None)):
+            return self._unknown_tool_result(name)
 
         cfg = entry.config
         tool_arguments, input_responses, request_state = split_mrtr_from_arguments(
@@ -1371,6 +1439,7 @@ class McpApplication:
                     trace=trace,
                 )
                 _apply_request_envelope(task_ctx, rc)
+                self._configure_visibility_context(task_ctx, rc)
                 task_ctx.task = TaskContext(
                     task_id,
                     self.task_manager,
@@ -1425,6 +1494,7 @@ class McpApplication:
             trace=trace,
         )
         _apply_request_envelope(ctx, rc)
+        self._configure_visibility_context(ctx, rc)
         ticket = self._in_flight.register(correlation_id, jsonrpc_id=jsonrpc_id)
         try:
             result = await run_pipeline(

@@ -13,22 +13,15 @@ def _wait_for(event: threading.Event) -> None:
 
 
 def test_nitrostack_warning_reaches_last_resort_stderr_without_subscribers():
-    logger = logging.getLogger("nitrostack.test.last-resort")
-    root_logger = logging.getLogger()
-    old_level = logger.level
-    old_propagate = logger.propagate
-    old_handlers = list(logger.handlers)
-    old_root_handlers = list(root_logger.handlers)
+    logger = logging.Logger("nitrostack.test.last-resort")
+    # Detach from pytest's logging capture handlers so Python's fallback is
+    # the only possible destination, as it is before any NitroStack handlers
+    # or subscriptions have been installed.
+    logger.parent = None
     old_last_resort = logging.lastResort
     fallback_stream = io.StringIO()
     fallback = logging.StreamHandler(fallback_stream)
     try:
-        for handler in old_handlers:
-            logger.removeHandler(handler)
-        # Pytest's root capture handler would count as a logging destination
-        # and prevent logging from invoking lastResort.
-        for handler in old_root_handlers:
-            root_logger.removeHandler(handler)
         fallback.setLevel(logging.WARNING)
         logging.lastResort = fallback
         logger.setLevel(logging.WARNING)
@@ -39,16 +32,6 @@ def test_nitrostack_warning_reaches_last_resort_stderr_without_subscribers():
     finally:
         logging.lastResort = old_last_resort
         fallback.close()
-        for handler in list(root_logger.handlers):
-            root_logger.removeHandler(handler)
-        for handler in old_root_handlers:
-            root_logger.addHandler(handler)
-        for handler in list(logger.handlers):
-            logger.removeHandler(handler)
-        for handler in old_handlers:
-            logger.addHandler(handler)
-        logger.setLevel(old_level)
-        logger.propagate = old_propagate
 
 
 def test_global_emitter_receives_nitrostack_records_and_extra_fields():
@@ -213,6 +196,7 @@ def test_slow_subscriber_has_bounded_buffer_and_keeps_recent_records():
     emitter = LogEmitter(max_buffer=2)
     entered = threading.Event()
     release = threading.Event()
+    drained = threading.Event()
     received = []
 
     def slow(record):

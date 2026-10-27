@@ -105,7 +105,12 @@ class LogEmitter:
         subscriber = _Subscriber(callback, self._max_buffer)
         with self._lock:
             self._subscribers.add(subscriber)
-            self._install_handlers_locked()
+            # Only the process-wide emitter owns NitroStack logger wiring.
+            # Standalone emitters are connected explicitly with
+            # LogEmitterHandler, avoiding duplicate delivery from the shared
+            # ``nitrostack`` logger hierarchy.
+            if self is log_emitter:
+                self._install_handlers_locked()
 
         def unsubscribe() -> None:
             with self._lock:

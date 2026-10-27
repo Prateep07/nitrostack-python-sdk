@@ -49,6 +49,7 @@ class ToolConfig:
     annotations: ToolAnnotations = field(default_factory=ToolAnnotations)
     task_support: Literal["forbidden", "optional", "required"] = "forbidden"
     visibility: Literal["visible", "hidden"] = "visible"
+    default_visible: Optional[bool] = None
     examples: Optional[ToolExamples] = None
     invocation: Optional[ToolInvocation] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -98,6 +99,7 @@ def tool(
     annotations: Optional[ToolAnnotations] = None,
     task_support: Literal["forbidden", "optional", "required"] = "forbidden",
     visibility: Literal["visible", "hidden"] = "visible",
+    default_visible: Optional[bool] = None,
     examples: Optional[ToolExamples] = None,
     invocation: Optional[ToolInvocation] = None,
     metadata: Optional[Dict[str, Any]] = None,
@@ -121,6 +123,7 @@ def tool(
             annotations=annotations,
             task_support=task_support,
             visibility=visibility,
+            default_visible=(visibility == "visible") if default_visible is None else default_visible,
             examples=examples,
             invocation=invocation,
             metadata=metadata,

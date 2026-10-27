@@ -12,17 +12,23 @@ def _wait_for(event: threading.Event) -> None:
     assert event.wait(2), "timed out waiting for log subscriber"
 
 
-def test_nitrostack_warning_reaches_last_resort_stderr_without_subscribers(capsys):
+def test_nitrostack_warning_reaches_last_resort_stderr_without_subscribers():
     logger = logging.getLogger("nitrostack.test.last-resort")
+    root_logger = logging.getLogger()
     old_level = logger.level
     old_propagate = logger.propagate
     old_handlers = list(logger.handlers)
+    old_root_handlers = list(root_logger.handlers)
     old_last_resort = logging.lastResort
     fallback_stream = io.StringIO()
     fallback = logging.StreamHandler(fallback_stream)
     try:
         for handler in old_handlers:
             logger.removeHandler(handler)
+        # Pytest's root capture handler would count as a logging destination
+        # and prevent logging from invoking lastResort.
+        for handler in old_root_handlers:
+            root_logger.removeHandler(handler)
         fallback.setLevel(logging.WARNING)
         logging.lastResort = fallback
         logger.setLevel(logging.WARNING)
@@ -33,6 +39,10 @@ def test_nitrostack_warning_reaches_last_resort_stderr_without_subscribers(capsy
     finally:
         logging.lastResort = old_last_resort
         fallback.close()
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+        for handler in old_root_handlers:
+            root_logger.addHandler(handler)
         for handler in list(logger.handlers):
             logger.removeHandler(handler)
         for handler in old_handlers:
@@ -89,6 +99,7 @@ def test_unsubscribe_waits_for_in_flight_callback():
     emitter = LogEmitter()
     entered = threading.Event()
     release = threading.Event()
+    drained = threading.Event()
     unsubscribe_returned = threading.Event()
     received = []
 
@@ -209,6 +220,8 @@ def test_slow_subscriber_has_bounded_buffer_and_keeps_recent_records():
         if record.message == "0":
             entered.set()
             release.wait(2)
+        if record.message == "5":
+            drained.set()
 
     unsubscribe_slow = emitter.subscribe(slow)
     logger = logging.getLogger("nitrostack.test.bounded")
@@ -231,14 +244,6 @@ def test_slow_subscriber_has_bounded_buffer_and_keeps_recent_records():
         logger.info("5")
         _wait_for(finished)
         release.set()
-        drained = threading.Event()
-        # Wait for the slow subscriber's queue to drain before checking its
-        # bounded-buffer policy. The retained messages are the newest ones.
-        for _ in range(100):
-            if received[-2:] == ["4", "5"]:
-                drained.set()
-                break
-            threading.Event().wait(0.01)
         _wait_for(drained)
         unsubscribe()
         assert received[0] == "0"

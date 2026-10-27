@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import sys
 
 from nitrostack.core.context import FileLogger
 from nitrostack.core.log_emitter import LogEmitter, LogEmitterHandler, log_emitter
@@ -9,6 +10,27 @@ from nitrostack.core.log_emitter import LogEmitter, LogEmitterHandler, log_emitt
 
 def _wait_for(event: threading.Event) -> None:
     assert event.wait(2), "timed out waiting for log subscriber"
+
+
+def test_nitrostack_warning_reaches_last_resort_stderr_without_subscribers(capsys):
+    logger = logging.getLogger("nitrostack.test.last-resort")
+    old_level = logger.level
+    old_propagate = logger.propagate
+    old_handlers = list(logger.handlers)
+    try:
+        for handler in old_handlers:
+            logger.removeHandler(handler)
+        logger.setLevel(logging.WARNING)
+        logger.propagate = True
+        logger.warning("warning before subscription")
+        assert "warning before subscription" in capsys.readouterr().err
+    finally:
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+        for handler in old_handlers:
+            logger.addHandler(handler)
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
 
 
 def test_global_emitter_receives_nitrostack_records_and_extra_fields():

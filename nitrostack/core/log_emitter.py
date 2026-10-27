@@ -98,16 +98,20 @@ class LogEmitter:
         self._max_buffer = max_buffer
         self._subscribers: set[_Subscriber] = set()
         self._lock = threading.Lock()
+        self._installed_handlers: dict[str, logging.Handler] = {}
 
     def subscribe(self, callback: Callable[[LogRecord], Any]) -> Callable[[], None]:
         """Subscribe to records; return an idempotent function to stop delivery."""
         subscriber = _Subscriber(callback, self._max_buffer)
         with self._lock:
             self._subscribers.add(subscriber)
+            self._install_handlers_locked()
 
         def unsubscribe() -> None:
             with self._lock:
                 self._subscribers.discard(subscriber)
+                if not self._subscribers:
+                    self._remove_handlers_locked()
             subscriber.unsubscribe()
 
         return unsubscribe
@@ -117,6 +121,24 @@ class LogEmitter:
             subscribers = tuple(self._subscribers)
         for subscriber in subscribers:
             subscriber.enqueue(record)
+
+    def _install_handlers_locked(self) -> None:
+        # Installing on both loggers ensures records are captured even when
+        # the HTTP logger disables propagation for its own stderr trace output.
+        for name in ("nitrostack", "nitrostack.transports.http"):
+            logger = logging.getLogger(name)
+            if name in self._installed_handlers:
+                continue
+            handler = LogEmitterHandler(self)
+            handler._nitrostack_log_emitter = True  # type: ignore[attr-defined]
+            logger.addHandler(handler)
+            self._installed_handlers[name] = handler
+
+    def _remove_handlers_locked(self) -> None:
+        for name, handler in self._installed_handlers.items():
+            logging.getLogger(name).removeHandler(handler)
+            handler.close()
+        self._installed_handlers.clear()
 
 
 class LogEmitterHandler(logging.Handler):
@@ -152,12 +174,14 @@ log_emitter = LogEmitter()
 
 
 def install_log_handler(logger_name: str = "nitrostack") -> None:
-    """Attach one bridge handler to a NitroStack logger, including isolated children."""
-    logger = logging.getLogger(logger_name)
-    if not any(getattr(handler, "_nitrostack_log_emitter", False) for handler in logger.handlers):
+    """Attach the bridge to a logger while global emitter subscriptions exist."""
+    with log_emitter._lock:
+        if not log_emitter._subscribers:
+            return
+        logger = logging.getLogger(logger_name)
+        if logger_name in log_emitter._installed_handlers:
+            return
         handler = LogEmitterHandler(log_emitter)
         handler._nitrostack_log_emitter = True  # type: ignore[attr-defined]
         logger.addHandler(handler)
-
-
-install_log_handler()
+        log_emitter._installed_handlers[logger_name] = handler

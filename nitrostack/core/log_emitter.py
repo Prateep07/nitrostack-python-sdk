@@ -123,16 +123,16 @@ class LogEmitter:
             subscriber.enqueue(record)
 
     def _install_handlers_locked(self) -> None:
-        # Installing on both loggers ensures records are captured even when
-        # the HTTP logger disables propagation for its own stderr trace output.
-        for name in ("nitrostack", "nitrostack.transports.http"):
-            logger = logging.getLogger(name)
-            if name in self._installed_handlers:
-                continue
-            handler = LogEmitterHandler(self)
-            handler._nitrostack_log_emitter = True  # type: ignore[attr-defined]
-            logger.addHandler(handler)
-            self._installed_handlers[name] = handler
+        self._install_handler_locked("nitrostack")
+
+    def _install_handler_locked(self, logger_name: str) -> None:
+        if logger_name in self._installed_handlers:
+            return
+        logger = logging.getLogger(logger_name)
+        handler = LogEmitterHandler(self)
+        handler._nitrostack_log_emitter = True  # type: ignore[attr-defined]
+        logger.addHandler(handler)
+        self._installed_handlers[logger_name] = handler
 
     def _remove_handlers_locked(self) -> None:
         for name, handler in self._installed_handlers.items():
@@ -178,10 +178,4 @@ def install_log_handler(logger_name: str = "nitrostack") -> None:
     with log_emitter._lock:
         if not log_emitter._subscribers:
             return
-        logger = logging.getLogger(logger_name)
-        if logger_name in log_emitter._installed_handlers:
-            return
-        handler = LogEmitterHandler(log_emitter)
-        handler._nitrostack_log_emitter = True  # type: ignore[attr-defined]
-        logger.addHandler(handler)
-        log_emitter._installed_handlers[logger_name] = handler
+        log_emitter._install_handler_locked(logger_name)

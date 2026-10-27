@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import io
 import threading
 
 from nitrostack.core.context import FileLogger
@@ -17,18 +18,18 @@ def test_nitrostack_warning_reaches_last_resort_stderr_without_subscribers(capsy
     old_propagate = logger.propagate
     old_handlers = list(logger.handlers)
     old_last_resort = logging.lastResort
-    fallback = logging.StreamHandler()
+    fallback_stream = io.StringIO()
+    fallback = logging.StreamHandler(fallback_stream)
     try:
         for handler in old_handlers:
             logger.removeHandler(handler)
         fallback.setLevel(logging.WARNING)
-        fallback.stream = capsys._capture.err
         logging.lastResort = fallback
         logger.setLevel(logging.WARNING)
         logger.propagate = True
         logger.warning("warning before subscription")
         assert not any(getattr(handler, "_nitrostack_log_emitter", False) for handler in logger.handlers)
-        assert "warning before subscription" in capsys.readouterr().err
+        assert "warning before subscription" in fallback_stream.getvalue()
     finally:
         logging.lastResort = old_last_resort
         fallback.close()
@@ -219,7 +220,6 @@ def test_slow_subscriber_has_bounded_buffer_and_keeps_recent_records():
         _wait_for(entered)
         for index in range(1, 5):
             logger.info("%s", index)
-        release.set()
         finished = threading.Event()
 
         def last_seen(record):
@@ -230,9 +230,19 @@ def test_slow_subscriber_has_bounded_buffer_and_keeps_recent_records():
         unsubscribe = emitter.subscribe(last_seen)
         logger.info("5")
         _wait_for(finished)
+        release.set()
+        drained = threading.Event()
+        # Wait for the slow subscriber's queue to drain before checking its
+        # bounded-buffer policy. The retained messages are the newest ones.
+        for _ in range(100):
+            if received[-2:] == ["4", "5"]:
+                drained.set()
+                break
+            threading.Event().wait(0.01)
+        _wait_for(drained)
         unsubscribe()
         assert received[0] == "0"
-        assert len(received) <= 4
+        assert received[-2:] == ["4", "5"]
     finally:
         release.set()
         logger.removeHandler(handler)

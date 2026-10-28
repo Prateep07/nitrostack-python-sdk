@@ -19,6 +19,7 @@ from nitrostack.core.context import (
     AuthContext,
     TaskContext,
 )
+from nitrostack.core.log_emitter import LogRecord, LogEmitter, LogEmitterHandler, log_emitter
 from nitrostack.core.task import (
     TaskManager,
     TaskData,
@@ -113,6 +114,11 @@ from nitrostack.auth.config import (
     ConfigModule,
     ConfigService,
 )
+from nitrostack.auth.secret import (
+    SecretValue,
+    is_secret_value,
+    unwrap_secret,
+)
 from nitrostack.widgets import (
     Component,
     WidgetCsp,
@@ -135,7 +141,6 @@ from nitrostack.protocol.mrtr import InputRequest, InputRequiredResult, accepted
 from nitrostack.tasks import InMemoryTaskStore, TaskAccessContext, TaskStore
 from nitrostack.tasks.authorization import check_task_access, extract_task_access_context
 from nitrostack.runtime import StatelessInvariants, assert_stateless_headers
-from nitrostack.transports import wrap_stateless_transport, StatelessIngressPipeline
 
 
 __all__ = [
@@ -204,8 +209,15 @@ __all__ = [
     "AudienceMismatchError",
     "ConfigModule",
     "ConfigService",
+    "SecretValue",
+    "is_secret_value",
+    "unwrap_secret",
     "NitroTestingModule",
     "TaskContext",
+    "LogRecord",
+    "LogEmitter",
+    "LogEmitterHandler",
+    "log_emitter",
     "TaskCancelledError",
     "TaskManager",
     "TaskData",
@@ -242,6 +254,4 @@ __all__ = [
     "extract_task_access_context",
     "StatelessInvariants",
     "assert_stateless_headers",
-    "wrap_stateless_transport",
-    "StatelessIngressPipeline",
 ]

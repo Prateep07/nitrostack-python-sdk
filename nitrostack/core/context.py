@@ -34,8 +34,13 @@ class FileLogger:
         level = getattr(logging, level_str, logging.DEBUG)
         self.logger.setLevel(level)
         
-        # Avoid adding duplicate handlers if initialized multiple times
-        if not self.logger.handlers:
+        # The log-emitter bridge is not an output handler; keep configuring
+        # the file/stdout destination even though that bridge is installed.
+        has_output_handler = any(
+            not getattr(handler, "_nitrostack_log_emitter", False)
+            for handler in self.logger.handlers
+        )
+        if not has_output_handler:
             formatter = logging.Formatter(
                 '%(asctime)s [%(levelname)s] (%(name)s): %(message)s'
             )

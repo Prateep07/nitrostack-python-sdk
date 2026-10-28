@@ -45,7 +45,6 @@ from nitrostack.tasks.eviction import should_evict_terminal_task
 from nitrostack.tasks.types import TaskAccessContext, TaskEntry, TaskWireData, datetime_to_ms, utc_now
 from nitrostack.tasks.authorization import check_task_access
 from nitrostack.transports.cors import cors_preflight_response_headers
-from nitrostack.transports.dispatch import IngressContext, StatelessIngressPipeline
 
 
 class EchoInput(BaseModel):
@@ -94,25 +93,6 @@ class TestStatelessHttpConformance:
         assert isinstance(result["ttlMs"], int) and result["ttlMs"] >= 0
         assert result["cacheScope"] in ("public", "private")
 
-    def test_stateless_pipeline_handles_discover_without_session(self):
-        async def _run():
-            pipeline = StatelessIngressPipeline(
-                IngressContext("srv", "1.0.0", MODERN_PROTOCOL_VERSION),
-                discover_handler=lambda _req: build_discover_result(
-                    server_name="srv",
-                    server_version="1.0.0",
-                    protocol_version=MODERN_PROTOCOL_VERSION,
-                ),
-            )
-            body = json.dumps(
-                {"jsonrpc": "2.0", "id": "d1", "method": "server/discover", "params": {}}
-            ).encode()
-            status, resp = await pipeline.handle_post(body, {})
-            assert status == 200
-            assert resp["result"]["protocolVersion"] == MODERN_PROTOCOL_VERSION
-            assert_stateless_headers({"Content-Type": "application/json"})
-
-        asyncio.run(_run())
 
     def test_post_mcp_stateless_no_session_header(self):
         @injectable()

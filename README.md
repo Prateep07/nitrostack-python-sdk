@@ -313,6 +313,19 @@ Example:
 server = ServerConfig(name="my-server", transport_type="http", max_sessions=100, session_timeout_ms=1_800_000)
 ```
 
+### Health resources
+
+Decorated health checks are exposed at both `health://status` and `health://checks`.
+The status resource keeps its original `{check_name: status}` JSON map for existing
+clients. The checks resource returns an aggregate payload with `status`, `uptimeSeconds`,
+per-check `name`, `status`, `latencyMs`, and `message`, plus `count`, `transforms`,
+`timestamp`, and `sdkVersion`. Checks default to a five-second timeout and run independently;
+set a per-check timeout with `@health_check("database", timeout=2.0)`. A false check result
+marks the aggregate `degraded`; a timeout or exception marks it `unhealthy` (exceptions are
+reported on that check with status `error`).
+
+`ServerHealthPayload` and `TransformTelemetry` are exported from `nitrostack` for typing.
+
 `ServerConfig.protocol_era` is used only when `MCP_STATELESS` and `NITRO_MCP_PROTOCOL_VERSION` are both unset. Unknown tokens become `auto`, same as an unknown env value.
 
 ---

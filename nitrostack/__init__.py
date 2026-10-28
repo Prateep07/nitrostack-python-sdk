@@ -69,6 +69,8 @@ from nitrostack.core.additional_decorators import (
     cache,
     rate_limit,
     health_check,
+    TransformTelemetry,
+    ServerHealthPayload,
 )
 from nitrostack.events.event_emitter import (
     on_event,
@@ -178,6 +180,8 @@ __all__ = [
     "cache",
     "rate_limit",
     "health_check",
+    "TransformTelemetry",
+    "ServerHealthPayload",
     "on_event",
     "EventEmitter",
     "ApiKeyModule",

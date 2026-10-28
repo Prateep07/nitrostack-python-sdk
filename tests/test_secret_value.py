@@ -152,7 +152,9 @@ def test_tracebacks_do_not_contain_the_raw_value():
     try:
         fail()
     except RuntimeError as exc:
-        text = "".join(traceback.format_exception(exc, capture_locals=True))
+        # capture_locals belongs to TracebackException (format_exception() has no such argument).
+        captured = traceback.TracebackException(type(exc), exc, exc.__traceback__, capture_locals=True)
+        text = "".join(captured.format())
     assert RAW not in text
     assert REDACTED in text
 

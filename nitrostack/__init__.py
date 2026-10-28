@@ -114,6 +114,11 @@ from nitrostack.auth.config import (
     ConfigModule,
     ConfigService,
 )
+from nitrostack.auth.secret import (
+    SecretValue,
+    is_secret_value,
+    unwrap_secret,
+)
 from nitrostack.widgets import (
     Component,
     WidgetCsp,
@@ -204,6 +209,9 @@ __all__ = [
     "AudienceMismatchError",
     "ConfigModule",
     "ConfigService",
+    "SecretValue",
+    "is_secret_value",
+    "unwrap_secret",
     "NitroTestingModule",
     "TaskContext",
     "LogRecord",

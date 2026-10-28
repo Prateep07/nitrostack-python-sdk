@@ -1074,6 +1074,7 @@ class McpApplication:
     def _build_transform_context(self, rc: Any, *, invoker: Any) -> TransformContext:
         """TransformContext for the in-flight request, identity from ``caller_identity``."""
         session_id, subject = caller_identity(rc, self.protocol_era)
+        session_key = VisibilityTransform.session_key(session_id, subject)
         exec_ctx = None
         if rc is not None:
             correlation_id, jsonrpc_id = _bind_correlation(rc)
@@ -1085,10 +1086,17 @@ class McpApplication:
                 trace=_trace_context_from_request_ctx(rc),
             )
             _apply_request_envelope(exec_ctx, rc)
+            self._configure_visibility_context(exec_ctx, rc)
+        visible_tools = [
+            self._build_tool_definition(entry)
+            for entry in self._tools.values()
+            if self.visibility_transform.is_visible(entry, session_key)
+        ]
         return TransformContext(
             session_id=session_id,
             subject=subject,
             execution_context=exec_ctx,
+            visible_tools=visible_tools,
             _invoker=invoker,
         )
 
@@ -1257,16 +1265,9 @@ class McpApplication:
         # Re-enter the normal call path so guards and validation run for the real tool.
         return await self._call_tool(name, arguments, _tctx=tctx)
 
-    @staticmethod
-    def _visibility_session_key(request_context: Any) -> tuple[str, str] | None:
-        session = getattr(request_context, "session", None)
-        session_id = getattr(session, "id", None) or getattr(session, "session_id", None)
-        if session_id is None:
-            return None
-        auth = auth_context_from_request(request_context)
-        return VisibilityTransform.session_key(
-            str(session_id), auth.subject if auth is not None else None
-        )
+    def _visibility_session_key(self, request_context: Any) -> tuple[str, str] | None:
+        session_id, subject = caller_identity(request_context, self.protocol_era)
+        return VisibilityTransform.session_key(session_id, subject)
 
     def _tool_visible(self, name: str, request_context: Any) -> bool:
         entry = self._tools.get(name)

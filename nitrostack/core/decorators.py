@@ -49,11 +49,11 @@ class ToolConfig:
     annotations: ToolAnnotations = field(default_factory=ToolAnnotations)
     task_support: Literal["forbidden", "optional", "required"] = "forbidden"
     visibility: Literal["visible", "hidden"] = "visible"
-    default_visible: Optional[bool] = None
     examples: Optional[ToolExamples] = None
     invocation: Optional[ToolInvocation] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     is_initial: bool = False
+    default_visible: Optional[bool] = None
 
 @dataclass
 class ResourceConfig:
@@ -99,10 +99,10 @@ def tool(
     annotations: Optional[ToolAnnotations] = None,
     task_support: Literal["forbidden", "optional", "required"] = "forbidden",
     visibility: Literal["visible", "hidden"] = "visible",
-    default_visible: Optional[bool] = None,
     examples: Optional[ToolExamples] = None,
     invocation: Optional[ToolInvocation] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    default_visible: Optional[bool] = None,
 ):
     """
     Decorator to register a method as an MCP Tool.

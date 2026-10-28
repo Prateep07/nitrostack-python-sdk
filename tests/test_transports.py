@@ -167,7 +167,7 @@ def test_http_health_and_cors():
             "/mcp",
             headers={"Origin": "http://example.com", "Access-Control-Request-Method": "POST"},
         )
-        assert preflight.status_code == 200
+        assert preflight.status_code == 204
         assert preflight.headers.get("access-control-allow-origin") == "*"
         allow_headers = preflight.headers.get("access-control-allow-headers", "")
         assert "Mcp-Session-Id" in allow_headers

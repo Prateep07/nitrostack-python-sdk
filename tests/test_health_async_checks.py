@@ -70,3 +70,88 @@ def test_no_never_awaited_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         _read_status()
+
+
+def _read_checks(app_module):
+    async def run():
+        harness = await NitroTestingModule.create(app_module)
+        return await harness.read_resource("health://checks")
+
+    return asyncio.run(run())
+
+
+def test_health_payload_distinguishes_healthy_degraded_and_failing():
+    @injectable()
+    class Svc:
+        @health_check("healthy")
+        def healthy(self):
+            return True
+
+        @health_check("degraded")
+        def degraded(self):
+            return False
+
+        @health_check("failing")
+        def failing(self):
+            raise RuntimeError("dependency unavailable")
+
+    @module(name="health-statuses", providers=[Svc])
+    class M:
+        pass
+
+    payload = _read_checks(M)
+    statuses = {check["name"]: check["status"] for check in payload["checks"]}
+    assert statuses == {"healthy": "healthy", "degraded": "unhealthy", "failing": "error"}
+    assert payload["status"] == "unhealthy"
+
+
+def test_false_check_degrades_aggregate_without_failing_it():
+    @injectable()
+    class Svc:
+        @health_check("partial")
+        def partial(self):
+            return False
+
+    @module(name="health-degraded", providers=[Svc])
+    class M:
+        pass
+
+    payload = _read_checks(M)
+    assert payload["status"] == "degraded"
+
+
+def test_timed_out_check_does_not_block_other_checks():
+    @injectable()
+    class Svc:
+        @health_check("slow", timeout=0.05)
+        async def slow(self):
+            await asyncio.sleep(0.5)
+            return True
+
+        @health_check("fast")
+        async def fast(self):
+            await asyncio.sleep(0.005)
+            return True
+
+    @module(name="health-timeouts", providers=[Svc])
+    class M:
+        pass
+
+    import time
+
+    started = time.perf_counter()
+    payload = _read_checks(M)
+    elapsed = time.perf_counter() - started
+    statuses = {check["name"]: check for check in payload["checks"]}
+    assert elapsed < 0.3
+    assert statuses["slow"]["status"] == "unhealthy"
+    assert "Timed out" in statuses["slow"]["message"]
+    assert statuses["fast"]["status"] == "healthy"
+    assert payload["status"] == "unhealthy"
+
+
+def test_health_status_retains_legacy_string_map():
+    status = _read_status()
+    assert status["async_ok"] == "healthy"
+    assert status["sync_ok"] == "healthy"
+    assert status["async_boom"] == "error: db down"

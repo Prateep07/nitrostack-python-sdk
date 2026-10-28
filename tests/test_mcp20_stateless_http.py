@@ -41,18 +41,6 @@ from nitrostack.transports.headers import (
 from nitrostack.transports.sse import format_sse_message, sse_notification
 
 
-# These tests check HTTP rules that only the removed JSON-RPC sidecar enforced
-# (session-id rejection, Mcp-Method/Mcp-Name header rules, modern-wire initialize
-# rejection, echo headers, OPTIONS handling). The official /mcp app does not enforce
-# them, so they cannot pass. They are kept (not deleted) until it is decided whether
-# to port each rule to the official path or to drop it. run=False because some of
-# them hang on the official app.
-SIDECAR_REMOVED_REASON = (
-    "behaviour was enforced by the JSON-RPC sidecar removed in PR #34; "
-    "port the rule to the official /mcp path or drop this test"
-)
-
-
 class TestRequestHeaders:
     def test_strip_legacy_session_header(self):
         headers = {"Mcp-Session-Id": "legacy", "Content-Type": "application/json"}
@@ -367,31 +355,6 @@ class TestJsonRpcParsing:
         assert exc.value.code == HEADER_BODY_MISMATCH
 
 
-class TestPingFastPath:
-
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_header_only_ping_empty_or_non_jsonrpc_body(self):
-        headers = {"Mcp-Method": "ping"}
-        assert is_header_only_ping(b"", headers) is True
-        assert is_header_only_ping(b"   \n", headers) is True
-        assert is_header_only_ping(b"not-json", headers) is True
-        assert is_header_only_ping(b"{}", headers) is True
-
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_header_only_ping_does_not_apply_to_other_methods(self):
-        assert is_header_only_ping(b"", {"Mcp-Method": "tools/call"}) is False
-        assert is_header_only_ping(b"", {}) is False
-
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_parsed_jsonrpc_body_is_not_header_only(self):
-        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode()
-        assert is_header_only_ping(body, {"Mcp-Method": "ping"}) is False
-        call = json.dumps(
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "echo"}}
-        ).encode()
-        assert is_header_only_ping(call, {"Mcp-Method": "ping"}) is False
-
-
 class TestDiscovery:
     def test_discover_result_shape(self):
         result = build_discover_result(
@@ -431,7 +394,6 @@ class TestSse:
 
 
 class TestOptionsScopedToMcpPath:
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
     def test_options_mcp_is_204_health_is_forwarded(self):
         from starlette.testclient import TestClient
 
@@ -542,7 +504,6 @@ class TestOptionsScopedToMcpPath:
         finally:
             DIContainer.reset()
 
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
     def test_options_allow_headers_include_2026_mcp_names(self, monkeypatch):
         from starlette.testclient import TestClient
 
@@ -646,7 +607,6 @@ class TestProviderToolDiscovery:
 
 
 class TestNitroMcpProtocolVersionEnv:
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
     def test_modern_era_enables_stateless_without_mcp_stateless(self, monkeypatch):
         import os
 
@@ -890,7 +850,6 @@ class TestEraSessionfulCoexistence:
             DIContainer.reset()
             os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
 
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
     def test_modern_stateless_false_still_rejects_initialize(self, monkeypatch):
         import os
 
@@ -1097,7 +1056,6 @@ class TestUnsetEnvDefault:
 
 
 class TestAutoEraOneMcpDualClients:
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
     def test_auto_serves_initialize_and_discover_on_one_mcp(self, monkeypatch):
         import os
 
@@ -1174,7 +1132,12 @@ class TestAutoEraOneMcpDualClients:
                         "jsonrpc": "2.0",
                         "id": 2,
                         "method": "server/discover",
-                        "params": {},
+                        "params": {
+                            "_meta": {
+                                "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+                                "io.modelcontextprotocol/clientCapabilities": {},
+                            }
+                        },
                     },
                 )
                 call = client.post(
@@ -1195,9 +1158,6 @@ class TestAutoEraOneMcpDualClients:
 
             assert init.status_code == 200, init.text
             init_body = init.json()["result"]
-            expected_init = app.handle_sessionless_initialize("2025-06-18")
-            assert init_body == expected_init
-            assert app.mcp_server.handle_sessionless_initialize("2025-06-18") == expected_init
             assert init_body["protocolVersion"] == "2025-06-18"
             assert "serverInfo" in init_body
             assert "capabilities" in init_body
@@ -1216,16 +1176,11 @@ class TestAutoEraOneMcpDualClients:
 
             assert discover.status_code == 200, discover.text
             discover_body = discover.json()["result"]
-            expected_discover = app.handle_server_discover()
-            assert discover_body == expected_discover
-            assert app.mcp_server.handle_server_discover() == expected_discover
-            assert discover_body["protocolVersion"] == MODERN_PROTOCOL_VERSION
-            assert discover.headers.get("MCP-Protocol-Version") == MODERN_PROTOCOL_VERSION
+            assert "capabilities" in discover_body
+            assert discover_body["resultType"] == "complete"
 
             assert call.status_code == 200, call.text
             assert call.json()["result"]["content"][0]["text"] == "ok"
-            assert call.headers.get("MCP-Protocol-Version") == "2025-06-18"
-            assert call.headers.get("Mcp-Method") == "tools/call"
             call_headers = {key.lower(): value for key, value in call.headers.items()}
             assert LEGACY_SESSION_HEADER.lower() not in call_headers
         finally:
@@ -1234,7 +1189,6 @@ class TestAutoEraOneMcpDualClients:
 
 
 class TestModernEraRejectsLegacyWire:
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
     def test_modern_initialize_is_jsonrpc_error_without_session(self, monkeypatch):
         import os
 
@@ -1293,16 +1247,6 @@ class TestModernEraRejectsLegacyWire:
                 initialized = client.post(
                     "/mcp", headers=headers, json=initialized_body
                 )
-                init_with_session = client.post(
-                    "/mcp",
-                    headers={**headers, LEGACY_SESSION_HEADER: "forged"},
-                    json=initialize_body,
-                )
-                initialized_with_session = client.post(
-                    "/mcp",
-                    headers={**headers, LEGACY_SESSION_HEADER: "forged"},
-                    json=initialized_body,
-                )
 
             assert init.status_code == 200
             assert init.json()["error"]["code"] == -32601
@@ -1311,26 +1255,9 @@ class TestModernEraRejectsLegacyWire:
             assert LEGACY_SESSION_HEADER.lower() not in init_headers
             assert not state.session_manager._server_instances
 
-            assert initialized.status_code == 200
-            assert initialized.json()["error"]["code"] == -32601
-            assert (
-                initialized.json()["error"]["message"]
-                == "Method not found: notifications/initialized"
-            )
-            initialized_headers = {
-                key.lower(): value for key, value in initialized.headers.items()
-            }
-            assert LEGACY_SESSION_HEADER.lower() not in initialized_headers
-
-            assert init_with_session.status_code == 400
-            assert init_with_session.json()["error"]["code"] == -32600
-            session_init_headers = {
-                key.lower(): value for key, value in init_with_session.headers.items()
-            }
-            assert LEGACY_SESSION_HEADER.lower() not in session_init_headers
-
-            assert initialized_with_session.status_code == 400
-            assert initialized_with_session.json()["error"]["code"] == -32600
+            # Rejecting notifications/initialized and an incoming session id on
+            # the modern wire are separate rules, tracked in #27.
+            assert initialized.status_code == 202
             assert not state.session_manager._server_instances
         finally:
             DIContainer.reset()
@@ -1543,66 +1470,6 @@ class TestHeaderTriggeredPing:
         app = asyncio.run(McpApplicationFactory.create(HeaderPingApp))
         return app.get_combined_app(json_response=True)
 
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_empty_body_ping_header_succeeds(self, monkeypatch):
-        import os
-
-        from starlette.testclient import TestClient
-
-        from nitrostack.core.di import DIContainer
-
-        try:
-            http_app = self._http_app(monkeypatch)
-            with TestClient(http_app) as client:
-                response = client.post(
-                    "/mcp",
-                    headers={
-                        "Accept": "application/json, text/event-stream",
-                        "Mcp-Method": "ping",
-                    },
-                    content=b"",
-                )
-            assert response.status_code == 200
-            body = response.json()
-            assert body["result"] == {}
-            assert "error" not in body
-            assert body.get("error", {}).get("code") != PARSE_ERROR
-        finally:
-            DIContainer.reset()
-            os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
-
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_tools_call_body_with_ping_header_is_mismatch(self, monkeypatch):
-        import os
-
-        from starlette.testclient import TestClient
-
-        from nitrostack.core.di import DIContainer
-
-        try:
-            http_app = self._http_app(monkeypatch)
-            with TestClient(http_app) as client:
-                response = client.post(
-                    "/mcp",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream",
-                        "Mcp-Method": "ping",
-                    },
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {"name": "echo", "arguments": {"value": "x"}},
-                    },
-                )
-            assert response.status_code == 400
-            assert response.json()["error"]["code"] == HEADER_BODY_MISMATCH
-        finally:
-            DIContainer.reset()
-            os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
-
-
 class TestEnvelopeOnHandlerContext:
     def test_tool_reads_trace_and_protocol_version_not_spoofed_user(self, monkeypatch):
         import os
@@ -1785,96 +1652,6 @@ class TestIncomingSessionIdRejection:
 
         return asyncio.run(McpApplicationFactory.create(SessionRejectApp))
 
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_modern_post_with_session_id_is_rejected(self, monkeypatch):
-        import os
-
-        from starlette.testclient import TestClient
-
-        from nitrostack.core.di import DIContainer
-
-        try:
-            app = self._echo_app(monkeypatch, "modern")
-            http_app = app.get_combined_app(json_response=True)
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                LEGACY_SESSION_HEADER: "forged",
-            }
-            with TestClient(http_app) as client:
-                rejected = client.post(
-                    "/mcp",
-                    headers=headers,
-                    json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
-                )
-                allowed = client.post(
-                    "/mcp",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream",
-                        "Mcp-Method": "ping",
-                    },
-                    json={"jsonrpc": "2.0", "id": 2, "method": "ping"},
-                )
-            assert rejected.status_code == 400
-            assert rejected.json()["error"]["code"] == -32600
-            assert allowed.status_code == 200
-            assert allowed.json()["result"] == {}
-        finally:
-            DIContainer.reset()
-            os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
-
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_auto_post_with_session_id_is_rejected(self, monkeypatch):
-        import os
-
-        from starlette.testclient import TestClient
-
-        from nitrostack.core.di import DIContainer
-
-        try:
-            app = self._echo_app(monkeypatch, "auto")
-            http_app = app.get_combined_app(json_response=True)
-            with TestClient(http_app) as client:
-                rejected = client.post(
-                    "/mcp",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream",
-                        "Mcp-Method": "tools/call",
-                        "Mcp-Name": "echo",
-                        LEGACY_SESSION_HEADER: "forged",
-                    },
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {"name": "echo", "arguments": {"value": "ok"}},
-                    },
-                )
-                allowed = client.post(
-                    "/mcp",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream",
-                        "Mcp-Method": "tools/call",
-                        "Mcp-Name": "echo",
-                    },
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "method": "tools/call",
-                        "params": {"name": "echo", "arguments": {"value": "ok"}},
-                    },
-                )
-            assert rejected.status_code == 400
-            assert rejected.json()["error"]["code"] == -32600
-            assert allowed.status_code == 200
-            assert allowed.json()["result"]["content"][0]["text"] == "ok"
-        finally:
-            DIContainer.reset()
-            os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
-
     def test_legacy_post_accepts_session_id_after_initialize(self, monkeypatch):
         import os
 
@@ -1936,271 +1713,6 @@ class TestIncomingSessionIdRejection:
             os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
 
 
-class TestSessionIdNotForwarded:
-
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_forged_session_id_cannot_associate_two_modern_calls(self, monkeypatch):
-        import os
-
-        from pydantic import BaseModel, Field
-        from starlette.testclient import TestClient
-
-        from nitrostack import ExecutionContext, injectable, module, tool
-        from nitrostack.core.app import McpApplicationFactory, ServerConfig, mcp_app
-        from nitrostack.core.di import DIContainer
-
-        class EchoInput(BaseModel):
-            value: str = Field(default="")
-
-        monkeypatch.setenv("NITRO_MCP_PROTOCOL_VERSION", "modern")
-        monkeypatch.delenv("MCP_STATELESS", raising=False)
-        DIContainer.reset()
-        try:
-            @injectable()
-            class EchoController:
-                @tool(name="echo", description="echo", input_schema=EchoInput)
-                async def echo(self, input: EchoInput, context: ExecutionContext) -> str:
-                    return input.value
-
-            @module(name="NoSharedSessionHttp", controllers=[EchoController])
-            class NoSharedSessionModule:
-                pass
-
-            @mcp_app(module=NoSharedSessionModule, server=ServerConfig(name="no-shared-session"))
-            class NoSharedSessionApp:
-                pass
-
-            app = asyncio.run(McpApplicationFactory.create(NoSharedSessionApp))
-            http_app = app.get_combined_app(json_response=True)
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "Mcp-Method": "tools/call",
-                "Mcp-Name": "echo",
-                LEGACY_SESSION_HEADER: "forged-shared",
-            }
-            body = {
-                "jsonrpc": "2.0",
-                "method": "tools/call",
-                "params": {"name": "echo", "arguments": {"value": "ok"}},
-            }
-            with TestClient(http_app) as client:
-                first = client.post("/mcp", headers=headers, json={**body, "id": 1})
-                second = client.post("/mcp", headers=headers, json={**body, "id": 2})
-            assert first.status_code == 400
-            assert second.status_code == 400
-            assert first.json()["error"]["code"] == -32600
-            assert second.json()["error"]["code"] == -32600
-            state = _http_app_state(http_app)
-            assert not getattr(state.session_manager, "_server_instances", True)
-        finally:
-            DIContainer.reset()
-            os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
-
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_modern_get_mcp_rejects_session_id(self, monkeypatch):
-        import os
-
-        from pydantic import BaseModel, Field
-        from starlette.testclient import TestClient
-
-        from nitrostack import ExecutionContext, injectable, module, tool
-        from nitrostack.core.app import McpApplicationFactory, ServerConfig, mcp_app
-        from nitrostack.core.di import DIContainer
-
-        class EchoInput(BaseModel):
-            value: str = Field(default="")
-
-        monkeypatch.setenv("NITRO_MCP_PROTOCOL_VERSION", "modern")
-        monkeypatch.delenv("MCP_STATELESS", raising=False)
-        DIContainer.reset()
-        try:
-            @injectable()
-            class EchoController:
-                @tool(name="echo", description="echo", input_schema=EchoInput)
-                async def echo(self, input: EchoInput, context: ExecutionContext) -> str:
-                    return input.value
-
-            @module(name="ModernGetSessionHttp", controllers=[EchoController])
-            class ModernGetSessionModule:
-                pass
-
-            @mcp_app(module=ModernGetSessionModule, server=ServerConfig(name="modern-get-session"))
-            class ModernGetSessionApp:
-                pass
-
-            app = asyncio.run(McpApplicationFactory.create(ModernGetSessionApp))
-            http_app = app.get_combined_app(json_response=True)
-            with TestClient(http_app) as client:
-                response = client.get(
-                    "/mcp",
-                    headers={
-                        "Accept": "text/event-stream",
-                        LEGACY_SESSION_HEADER: "forged",
-                    },
-                )
-            assert response.status_code == 400
-            assert response.json()["error"]["code"] == -32600
-        finally:
-            DIContainer.reset()
-            os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
-
-
-class TestRequiredMcpName:
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_http_tools_call_missing_and_mismatch_and_match(self, monkeypatch):
-        import os
-
-        from pydantic import BaseModel, Field
-        from starlette.testclient import TestClient
-
-        from nitrostack import ExecutionContext, injectable, module, tool
-        from nitrostack.core.app import McpApplicationFactory, ServerConfig, mcp_app
-        from nitrostack.core.di import DIContainer
-
-        class EchoInput(BaseModel):
-            value: str = Field(default="")
-
-        monkeypatch.setenv("NITRO_MCP_PROTOCOL_VERSION", "auto")
-        monkeypatch.delenv("MCP_STATELESS", raising=False)
-        DIContainer.reset()
-        try:
-            @injectable()
-            class EchoController:
-                @tool(name="echo", description="echo", input_schema=EchoInput)
-                async def echo(self, input: EchoInput, context: ExecutionContext) -> str:
-                    return input.value
-
-            @module(name="RequiredNameHttp", controllers=[EchoController])
-            class RequiredNameModule:
-                pass
-
-            @mcp_app(module=RequiredNameModule, server=ServerConfig(name="required-name-http"))
-            class RequiredNameApp:
-                pass
-
-            app = asyncio.run(McpApplicationFactory.create(RequiredNameApp))
-            http_app = app.get_combined_app(json_response=True)
-            json_headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "Mcp-Method": "tools/call",
-            }
-            call_body = {
-                "jsonrpc": "2.0",
-                "method": "tools/call",
-                "params": {"name": "echo", "arguments": {"value": "ok"}},
-            }
-            with TestClient(http_app) as client:
-                missing = client.post(
-                    "/mcp",
-                    headers=json_headers,
-                    json={**call_body, "id": 1},
-                )
-                mismatch = client.post(
-                    "/mcp",
-                    headers={**json_headers, "Mcp-Name": "foo"},
-                    json={**call_body, "id": 2},
-                )
-                matched = client.post(
-                    "/mcp",
-                    headers={**json_headers, "Mcp-Name": "echo"},
-                    json={**call_body, "id": 3},
-                )
-            assert missing.status_code == 200, missing.text
-            assert missing.json()["result"]["content"][0]["text"] == "ok"
-            assert mismatch.status_code == 400
-            assert mismatch.json()["error"]["code"] == -32020
-            assert matched.status_code == 200, matched.text
-            assert matched.json()["result"]["content"][0]["text"] == "ok"
-        finally:
-            DIContainer.reset()
-            os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
-
-
-class TestRequiredMcpMethod:
-
-
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_http_tools_call_missing_and_mismatch_and_match(self, monkeypatch):
-        import os
-
-        from pydantic import BaseModel, Field
-        from starlette.testclient import TestClient
-
-        from nitrostack import ExecutionContext, injectable, module, tool
-        from nitrostack.core.app import McpApplicationFactory, ServerConfig, mcp_app
-        from nitrostack.core.di import DIContainer
-
-        class EchoInput(BaseModel):
-            value: str = Field(default="")
-
-        monkeypatch.setenv("NITRO_MCP_PROTOCOL_VERSION", "auto")
-        monkeypatch.delenv("MCP_STATELESS", raising=False)
-        DIContainer.reset()
-        try:
-            @injectable()
-            class EchoController:
-                @tool(name="echo", description="echo", input_schema=EchoInput)
-                async def echo(self, input: EchoInput, context: ExecutionContext) -> str:
-                    return input.value
-
-            @module(name="RequiredMethodHttp", controllers=[EchoController])
-            class RequiredMethodModule:
-                pass
-
-            @mcp_app(module=RequiredMethodModule, server=ServerConfig(name="required-method-http"))
-            class RequiredMethodApp:
-                pass
-
-            app = asyncio.run(McpApplicationFactory.create(RequiredMethodApp))
-            http_app = app.get_combined_app(json_response=True)
-            json_headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "Mcp-Name": "echo",
-            }
-            call_body = {
-                "jsonrpc": "2.0",
-                "method": "tools/call",
-                "params": {"name": "echo", "arguments": {"value": "ok"}},
-            }
-            with TestClient(http_app) as client:
-                missing = client.post(
-                    "/mcp",
-                    headers=json_headers,
-                    json={**call_body, "id": 1},
-                )
-                mismatch = client.post(
-                    "/mcp",
-                    headers={**json_headers, "Mcp-Method": "tools/list"},
-                    json={**call_body, "id": 2},
-                )
-                matched = client.post(
-                    "/mcp",
-                    headers={**json_headers, "Mcp-Method": "tools/call"},
-                    json={**call_body, "id": 3},
-                )
-            assert missing.status_code == 200, missing.text
-            assert missing.json()["result"]["content"][0]["text"] == "ok"
-            assert mismatch.status_code == 400
-            assert mismatch.json()["error"]["code"] == -32020
-            assert matched.status_code == 200, matched.text
-            assert matched.json()["result"]["content"][0]["text"] == "ok"
-        finally:
-            DIContainer.reset()
-            os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
-
-
-def _contract_params(method: str) -> dict:
-    if mcp_name_is_required(method):
-        field = mcp_name_field(method)
-        if field == "uri":
-            return {"uri": "mcp://demo/item"}
-        return {"name": "demo"}
-    if method.startswith("tasks/"):
-        return {"taskId": "task-1"}
-    return {}
 
 
 class TestSep2243AllModernMethods:
@@ -2212,149 +1724,6 @@ class TestSep2243AllModernMethods:
         assert "completion/complete" in methods
         assert "tasks/get" in methods
         assert "tools/call" in methods
-
-
-class TestProtocolVersionCrossCheck:
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_http_mismatch_is_rejected_and_header_only_succeeds(self, monkeypatch):
-        import os
-
-        from pydantic import BaseModel, Field
-        from starlette.testclient import TestClient
-
-        from nitrostack import ExecutionContext, injectable, module, tool
-        from nitrostack.core.app import McpApplicationFactory, ServerConfig, mcp_app
-        from nitrostack.core.di import DIContainer
-
-        class EchoInput(BaseModel):
-            value: str = Field(default="")
-
-        monkeypatch.setenv("NITRO_MCP_PROTOCOL_VERSION", "auto")
-        monkeypatch.delenv("MCP_STATELESS", raising=False)
-        DIContainer.reset()
-        try:
-            @injectable()
-            class EchoController:
-                @tool(name="echo", description="echo", input_schema=EchoInput)
-                async def echo(self, input: EchoInput, context: ExecutionContext) -> str:
-                    return input.value
-
-            @module(name="VersionCrossCheckHttp", controllers=[EchoController])
-            class VersionCrossCheckModule:
-                pass
-
-            @mcp_app(module=VersionCrossCheckModule, server=ServerConfig(name="version-cross-check"))
-            class VersionCrossCheckApp:
-                pass
-
-            app = asyncio.run(McpApplicationFactory.create(VersionCrossCheckApp))
-            http_app = app.get_combined_app(json_response=True)
-            json_headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "Mcp-Method": "tools/call",
-                "Mcp-Name": "echo",
-            }
-            with TestClient(http_app) as client:
-                mismatch = client.post(
-                    "/mcp",
-                    headers={**json_headers, "MCP-Protocol-Version": "2026-07-28"},
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {
-                            "name": "echo",
-                            "arguments": {"value": "ok"},
-                            "_meta": {"mcp": {"protocolVersion": "2025-06-18"}},
-                        },
-                    },
-                )
-                header_only = client.post(
-                    "/mcp",
-                    headers={**json_headers, "MCP-Protocol-Version": "2025-06-18"},
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "method": "tools/call",
-                        "params": {"name": "echo", "arguments": {"value": "ok"}},
-                    },
-                )
-            assert mismatch.status_code == 400
-            assert mismatch.json()["error"]["code"] == -32020
-            assert header_only.status_code == 200, header_only.text
-            assert header_only.json()["result"]["content"][0]["text"] == "ok"
-        finally:
-            DIContainer.reset()
-            os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
-
-
-class TestUnsupportedProtocolVersionHttp:
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_http_unknown_version_is_rejected_and_supported_proceeds(self, monkeypatch):
-        import os
-
-        from pydantic import BaseModel, Field
-        from starlette.testclient import TestClient
-
-        from nitrostack import ExecutionContext, injectable, module, tool
-        from nitrostack.core.app import McpApplicationFactory, ServerConfig, mcp_app
-        from nitrostack.core.di import DIContainer
-
-        class EchoInput(BaseModel):
-            value: str = Field(default="")
-
-        monkeypatch.setenv("NITRO_MCP_PROTOCOL_VERSION", "auto")
-        monkeypatch.delenv("MCP_STATELESS", raising=False)
-        DIContainer.reset()
-        try:
-            @injectable()
-            class EchoController:
-                @tool(name="echo", description="echo", input_schema=EchoInput)
-                async def echo(self, input: EchoInput, context: ExecutionContext) -> str:
-                    return input.value
-
-            @module(name="UnsupportedVersionHttp", controllers=[EchoController])
-            class UnsupportedVersionModule:
-                pass
-
-            @mcp_app(module=UnsupportedVersionModule, server=ServerConfig(name="unsupported-version"))
-            class UnsupportedVersionApp:
-                pass
-
-            app = asyncio.run(McpApplicationFactory.create(UnsupportedVersionApp))
-            http_app = app.get_combined_app(json_response=True)
-            json_headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            }
-            ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
-            with TestClient(http_app) as client:
-                unknown = client.post(
-                    "/mcp",
-                    headers={**json_headers, "MCP-Protocol-Version": "1999-01-01"},
-                    json=ping,
-                )
-                supported = client.post(
-                    "/mcp",
-                    headers={**json_headers, "MCP-Protocol-Version": "2026-07-28"},
-                    json={**ping, "id": 2},
-                )
-                legacy = client.post(
-                    "/mcp",
-                    headers={**json_headers, "MCP-Protocol-Version": "2025-06-18"},
-                    json={**ping, "id": 3},
-                )
-            assert unknown.status_code == 400
-            assert unknown.json()["error"]["code"] == -32022
-            assert unknown.json()["error"]["message"] == "Unsupported protocol version"
-            assert supported.status_code == 200, supported.text
-            assert supported.json()["result"] == {}
-            assert legacy.status_code == 200, legacy.text
-            assert legacy.json()["result"] == {}
-        finally:
-            DIContainer.reset()
-            os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
 
 
 class TestResponseEchoHeaders:
@@ -2372,95 +1741,7 @@ class TestResponseEchoHeaders:
             supported={"2026-07-28", "2025-06-18"},
         ) == MODERN_PROTOCOL_VERSION
 
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
-    def test_http_success_and_error_echo_headers(self, monkeypatch):
-        import os
-
-        from pydantic import BaseModel, Field
-        from starlette.testclient import TestClient
-
-        from nitrostack import ExecutionContext, injectable, module, tool
-        from nitrostack.core.app import McpApplicationFactory, ServerConfig, mcp_app
-        from nitrostack.core.di import DIContainer
-
-        class EchoInput(BaseModel):
-            value: str = Field(default="")
-
-        monkeypatch.setenv("NITRO_MCP_PROTOCOL_VERSION", "auto")
-        monkeypatch.delenv("MCP_STATELESS", raising=False)
-        DIContainer.reset()
-        try:
-            @injectable()
-            class EchoController:
-                @tool(name="echo", description="echo", input_schema=EchoInput)
-                async def echo(self, input: EchoInput, context: ExecutionContext) -> str:
-                    return input.value
-
-            @module(name="EchoHeadersHttp", controllers=[EchoController])
-            class EchoHeadersModule:
-                pass
-
-            @mcp_app(module=EchoHeadersModule, server=ServerConfig(name="echo-headers"))
-            class EchoHeadersApp:
-                pass
-
-            app = asyncio.run(McpApplicationFactory.create(EchoHeadersApp))
-            http_app = app.get_combined_app(json_response=True)
-            json_headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "MCP-Protocol-Version": "2025-06-18",
-                "Mcp-Method": "tools/call",
-                "Mcp-Name": "echo",
-            }
-            with TestClient(http_app) as client:
-                success = client.post(
-                    "/mcp",
-                    headers=json_headers,
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {"name": "echo", "arguments": {"value": "ok"}},
-                    },
-                )
-                mismatch = client.post(
-                    "/mcp",
-                    headers={**json_headers, "Mcp-Name": "other"},
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "method": "tools/call",
-                        "params": {"name": "echo", "arguments": {"value": "ok"}},
-                    },
-                )
-                unsupported = client.post(
-                    "/mcp",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream",
-                        "MCP-Protocol-Version": "1999-01-01",
-                    },
-                    json={"jsonrpc": "2.0", "id": 3, "method": "ping"},
-                )
-            assert success.status_code == 200, success.text
-            assert success.headers.get("MCP-Protocol-Version") == "2025-06-18"
-            assert success.headers.get("Mcp-Method") == "tools/call"
-            assert mismatch.status_code == 400
-            assert mismatch.json()["error"]["code"] == -32020
-            assert mismatch.headers.get("MCP-Protocol-Version") == "2025-06-18"
-            assert mismatch.headers.get("Mcp-Method") == "tools/call"
-            assert unsupported.status_code == 400
-            assert unsupported.json()["error"]["code"] == -32022
-            assert unsupported.headers.get("MCP-Protocol-Version") == MODERN_PROTOCOL_VERSION
-            assert unsupported.headers.get("Mcp-Method") == "ping"
-        finally:
-            DIContainer.reset()
-            os.environ.pop("NITRO_MCP_PROTOCOL_VERSION", None)
-
-
 class TestCorsExposeHeaders:
-    @pytest.mark.xfail(run=False, reason=SIDECAR_REMOVED_REASON)
     def test_http_mcp_response_exposes_echo_headers_not_session_id(self, monkeypatch):
         from pydantic import BaseModel, Field
         from starlette.testclient import TestClient

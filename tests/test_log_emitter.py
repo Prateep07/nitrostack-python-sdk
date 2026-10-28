@@ -170,6 +170,43 @@ def test_http_logger_with_propagation_disabled_reaches_subscribers():
                 handler.close()
 
 
+def test_http_logger_enabled_before_subscribe_reaches_subscribers():
+    from nitrostack.transports.http import _enable_trace_logging, logger as http_logger
+
+    received = []
+    done = threading.Event()
+    old_level = http_logger.level
+    old_propagate = http_logger.propagate
+    old_trace_handlers = {
+        handler
+        for handler in http_logger.handlers
+        if getattr(handler, "_nitrostack_trace", False)
+    }
+    # Server start order: trace logging is enabled before tooling subscribes.
+    _enable_trace_logging()
+    unsubscribe = log_emitter.subscribe(lambda record: (received.append(record), done.set()))
+    try:
+        http_logger.info("HTTP record after late subscribe")
+        _wait_for(done)
+        assert received[0].logger_name == "nitrostack.transports.http"
+        assert received[0].message == "HTTP record after late subscribe"
+    finally:
+        unsubscribe()
+        assert not any(
+            getattr(handler, "_nitrostack_log_emitter", False)
+            for handler in http_logger.handlers
+        )
+        http_logger.setLevel(old_level)
+        http_logger.propagate = old_propagate
+        for handler in list(http_logger.handlers):
+            if (
+                getattr(handler, "_nitrostack_trace", False)
+                and handler not in old_trace_handlers
+            ):
+                http_logger.removeHandler(handler)
+                handler.close()
+
+
 def test_raising_subscriber_does_not_prevent_another_subscriber():
     emitter = LogEmitter()
     received = []

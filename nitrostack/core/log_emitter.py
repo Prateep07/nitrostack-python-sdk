@@ -99,6 +99,9 @@ class LogEmitter:
         self._subscribers: set[_Subscriber] = set()
         self._lock = threading.Lock()
         self._installed_handlers: dict[str, logging.Handler] = {}
+        # Loggers to bridge while subscribers exist. A logger with
+        # ``propagate=False`` never reaches ``nitrostack``, so it needs its own.
+        self._bridged_loggers: set[str] = {"nitrostack"}
 
     def subscribe(self, callback: Callable[[LogRecord], Any]) -> Callable[[], None]:
         """Subscribe to records; return an idempotent function to stop delivery."""
@@ -128,7 +131,8 @@ class LogEmitter:
             subscriber.enqueue(record)
 
     def _install_handlers_locked(self) -> None:
-        self._install_handler_locked("nitrostack")
+        for logger_name in self._bridged_loggers:
+            self._install_handler_locked(logger_name)
 
     def _install_handler_locked(self, logger_name: str) -> None:
         if logger_name in self._installed_handlers:
@@ -179,8 +183,11 @@ log_emitter = LogEmitter()
 
 
 def install_log_handler(logger_name: str = "nitrostack") -> None:
-    """Attach the bridge to a logger while global emitter subscriptions exist."""
+    """Bridge a logger to the global emitter whenever it has subscribers.
+
+    The name is remembered, so a later ``subscribe()`` still attaches to it.
+    """
     with log_emitter._lock:
-        if not log_emitter._subscribers:
-            return
-        log_emitter._install_handler_locked(logger_name)
+        log_emitter._bridged_loggers.add(logger_name)
+        if log_emitter._subscribers:
+            log_emitter._install_handler_locked(logger_name)

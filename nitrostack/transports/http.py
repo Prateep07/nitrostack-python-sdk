@@ -63,6 +63,7 @@ from nitrostack.transports.headers import (
 )
 from nitrostack.transports.subscriptions import subscriptions_listen_endpoint
 from nitrostack.transports.proxy import public_url_for_request
+from nitrostack.core.log_emitter import install_log_handler
 
 if TYPE_CHECKING:
     from nitrostack.core.app import McpApplication
@@ -130,6 +131,7 @@ def _enable_trace_logging() -> None:
     traces are not emitted twice once `FileLogger` does attach its handler.
     stderr keeps them off stdout, which dual mode uses for JSON-RPC.
     """
+    install_log_handler("nitrostack.transports.http")
     if any(getattr(handler, "_nitrostack_trace", False) for handler in logger.handlers):
         return
     handler = logging.StreamHandler(sys.stderr)

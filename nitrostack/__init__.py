@@ -19,6 +19,7 @@ from nitrostack.core.context import (
     AuthContext,
     TaskContext,
 )
+from nitrostack.core.log_emitter import LogRecord, LogEmitter, LogEmitterHandler, log_emitter
 from nitrostack.core.task import (
     TaskManager,
     TaskData,
@@ -205,6 +206,10 @@ __all__ = [
     "ConfigService",
     "NitroTestingModule",
     "TaskContext",
+    "LogRecord",
+    "LogEmitter",
+    "LogEmitterHandler",
+    "log_emitter",
     "TaskCancelledError",
     "TaskManager",
     "TaskData",

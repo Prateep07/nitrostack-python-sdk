@@ -328,6 +328,7 @@ existing error string). A timed-out check has status `timeout`.
 Async checks are timed out on the event loop. Sync checks run in a dedicated four-worker pool,
 with at most four submitted sync checks at a time; a timed-out sync function keeps its worker
 slot until it returns, but does not hold up the resource response or `asyncio.run()` shutdown.
+Executor threads are non-daemon, so a sync check that never returns can still delay process exit.
 Sync checks therefore run off the main thread and should not depend on thread-bound resources
 such as a database connection created on the main thread. Transform entries currently report
 their name, type, and order; `details` is reserved for telemetry that is not yet collected.

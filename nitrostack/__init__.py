@@ -6,7 +6,20 @@ try:
     __version__ = _package_version("nitrostack")
 except PackageNotFoundError:
     # Keep the SDK version available when running directly from a source checkout.
-    __version__ = "0.3.2"
+    try:
+        from pathlib import Path
+
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # Python 3.10
+            import tomli as tomllib
+
+        _project_metadata = tomllib.loads(
+            (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        __version__ = str(_project_metadata["project"]["version"])
+    except (ImportError, KeyError, OSError, ValueError, TypeError):
+        __version__ = "unknown"
 
 from nitrostack.core.decorators import (
     tool,

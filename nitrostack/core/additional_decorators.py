@@ -1,6 +1,8 @@
 import time
 import inspect
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from typing import Callable, Any, Dict, List, Tuple, TypedDict, Literal, Optional
 from nitrostack.core.context import ExecutionContext
@@ -87,7 +89,7 @@ class TransformTelemetry(TypedDict):
 
 class HealthCheckResult(TypedDict):
     name: str
-    status: str
+    status: Literal["healthy", "unhealthy", "error", "timeout"]
     latencyMs: float
     message: Optional[str]
 
@@ -98,9 +100,6 @@ class ServerHealthPayload(TypedDict, total=False):
     checks: List[HealthCheckResult]
     count: int
     transforms: List[TransformTelemetry]
-    transformsPipeline: Dict[str, Any]
-    sandboxWorkerPool: Dict[str, Any]
-    spillover: Dict[str, Any]
     timestamp: str
     sdkVersion: str
 
@@ -111,6 +110,14 @@ class HealthCheckRegistry:
     # Maps name -> bound_callable
     _bound_checks: Dict[str, Tuple[Callable[[], bool], float]] = {}
     DEFAULT_TIMEOUT_SECONDS = 5.0
+    SYNC_EXECUTOR_WORKERS = 4
+    _sync_executor = ThreadPoolExecutor(
+        max_workers=SYNC_EXECUTOR_WORKERS,
+        thread_name_prefix="nitrostack-health",
+    )
+    # Bound submitted work as well as running threads. Timed-out functions retain
+    # their slot until they actually return, preventing an unbounded work queue.
+    _sync_slots = threading.BoundedSemaphore(SYNC_EXECUTOR_WORKERS)
 
     @classmethod
     def register(cls, name: str, func: Callable, class_type: Any = None) -> None:
@@ -143,6 +150,7 @@ class HealthCheckRegistry:
         return {
             result["name"]: (
                 f'error: {result["message"]}' if result["status"] == "error"
+                else "unhealthy" if result["status"] == "timeout"
                 else result["status"]
             )
             for result in detailed
@@ -157,14 +165,22 @@ class HealthCheckRegistry:
                 async def invoke():
                     if inspect.iscoroutinefunction(check):
                         return await check()
-                    result = await asyncio.to_thread(check)
+                    while not cls._sync_slots.acquire(blocking=False):
+                        await asyncio.sleep(0.01)
+                    try:
+                        future = cls._sync_executor.submit(check)
+                    except BaseException:
+                        cls._sync_slots.release()
+                        raise
+                    future.add_done_callback(lambda _future: cls._sync_slots.release())
+                    result = await asyncio.wrap_future(future)
                     return await result if inspect.isawaitable(result) else result
 
                 outcome = await asyncio.wait_for(invoke(), timeout=timeout)
                 status = "healthy" if outcome else "unhealthy"
                 message = None if outcome else "Check returned false"
             except asyncio.TimeoutError:
-                status, message = "unhealthy", f"Timed out after {timeout:g}s"
+                status, message = "timeout", f"Timed out after {timeout:g}s"
             except Exception as exc:  # noqa: BLE001 - one bad check must not hide the rest
                 status, message = "error", str(exc)
             return {

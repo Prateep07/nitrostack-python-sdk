@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 import warnings
 
 import pytest
@@ -102,6 +103,8 @@ def test_health_payload_distinguishes_healthy_degraded_and_failing():
     payload = _read_checks(M)
     statuses = {check["name"]: check["status"] for check in payload["checks"]}
     assert statuses == {"healthy": "healthy", "degraded": "unhealthy", "failing": "error"}
+    failing_check = next(check for check in payload["checks"] if check["name"] == "failing")
+    assert failing_check["message"] == "Check failed"
     assert payload["status"] == "unhealthy"
 
 
@@ -120,12 +123,14 @@ def test_false_check_degrades_aggregate_without_failing_it():
     assert payload["status"] == "degraded"
 
 
-def test_timed_out_check_does_not_block_other_checks():
+def test_timed_out_sync_check_does_not_block_asyncio_run_or_other_checks():
+    release = threading.Event()
+
     @injectable()
     class Svc:
-        @health_check("slow", timeout=0.05)
-        async def slow(self):
-            await asyncio.sleep(0.5)
+        @health_check("slow_sync", timeout=0.05)
+        def slow_sync(self):
+            release.wait(timeout=5)
             return True
 
         @health_check("fast")
@@ -137,15 +142,27 @@ def test_timed_out_check_does_not_block_other_checks():
     class M:
         pass
 
-    import time
+    result = {}
+    read_complete = threading.Event()
 
-    started = time.perf_counter()
-    payload = _read_checks(M)
-    elapsed = time.perf_counter() - started
+    def read_resource():
+        try:
+            result["payload"] = _read_checks(M)
+        finally:
+            read_complete.set()
+
+    reader = threading.Thread(target=read_resource)
+    reader.start()
+    completed_before_release = read_complete.wait(timeout=2)
+    release.set()
+    reader.join(timeout=2)
+
+    assert completed_before_release, "asyncio.run waited for the timed-out sync check"
+    assert not reader.is_alive()
+    payload = result["payload"]
     statuses = {check["name"]: check for check in payload["checks"]}
-    assert elapsed < 0.3
-    assert statuses["slow"]["status"] == "unhealthy"
-    assert "Timed out" in statuses["slow"]["message"]
+    assert statuses["slow_sync"]["status"] == "timeout"
+    assert statuses["slow_sync"]["message"] == "Timed out after 0.05s"
     assert statuses["fast"]["status"] == "healthy"
     assert payload["status"] == "unhealthy"
 

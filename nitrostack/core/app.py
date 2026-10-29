@@ -28,6 +28,7 @@ from mcp.types import (
     UnsubscribeRequestParams,
 )
 from pydantic import BaseModel, create_model
+from nitrostack import __version__ as _sdk_version
 from nitrostack.transforms import (
     TransformContext,
     TransformError,
@@ -586,6 +587,7 @@ class McpApplication:
     def __init__(self, app_class: Type):
         self.app_class = app_class
         self._started_at = time.monotonic()
+        self._sdk_version = _sdk_version
         if hasattr(app_class, "_mcp_app_module"):
             self.root_module = app_class._mcp_app_module
             self.server_config = app_class._mcp_app_server
@@ -855,13 +857,11 @@ class McpApplication:
         async def health_checks_resource(context: ExecutionContext) -> ServerHealthPayload:
             checks = await HealthCheckRegistry.run_detailed()
             has_failures = any(
-                check["status"] == "error"
-                or (check["status"] == "unhealthy" and (check["message"] or "").startswith("Timed out"))
+                check["status"] in {"error", "timeout"}
                 for check in checks
             )
             has_unhealthy = any(
                 check["status"] == "unhealthy"
-                and not (check["message"] or "").startswith("Timed out")
                 for check in checks
             )
             transforms = []
@@ -873,11 +873,13 @@ class McpApplication:
                     "order": order,
                     "details": {},
                 })
-            try:
-                from importlib.metadata import version
-                sdk_version = version("nitrostack")
-            except Exception:
-                sdk_version = self.server_config.version
+            public_checks = [
+                {
+                    **check,
+                    "message": "Check failed" if check["status"] == "error" else check["message"],
+                }
+                for check in checks
+            ]
             payload: ServerHealthPayload = {
                 "status": (
                     "unhealthy" if has_failures
@@ -885,11 +887,11 @@ class McpApplication:
                     else "healthy"
                 ),
                 "uptimeSeconds": int(time.monotonic() - self._started_at),
-                "checks": checks,
-                "count": len(checks),
+                "checks": public_checks,
+                "count": len(public_checks),
                 "transforms": transforms,
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-                "sdkVersion": sdk_version,
+                "sdkVersion": self._sdk_version,
             }
             return payload
 

@@ -1,5 +1,13 @@
 # NitroStack Python SDK Public API Exports
 
+try:
+    from importlib.metadata import PackageNotFoundError, version as _package_version
+
+    __version__ = _package_version("nitrostack")
+except PackageNotFoundError:
+    # Keep the SDK version available when running directly from a source checkout.
+    __version__ = "0.3.2"
+
 from nitrostack.core.decorators import (
     tool,
     resource,
@@ -146,6 +154,7 @@ from nitrostack.runtime import StatelessInvariants, assert_stateless_headers
 
 
 __all__ = [
+    "__version__",
     "tool",
     "resource",
     "prompt",
